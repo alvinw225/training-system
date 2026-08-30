@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>國泰人壽新人日盤系統</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        cathayGreen: '#005537',
+                        cathayLightGreen: '#007A52'
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-slate-100 font-sans antialiased">
+    <div id="root"></div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+        import { getFirestore, collection, onSnapshot, doc, setDoc } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+        window.firebaseModules = {
+            initializeApp, getAuth, signInAnonymously, signInWithCustomToken, getFirestore, collection, onSnapshot, doc, setDoc
+        };
+        window.dispatchEvent(new Event('firebase-loaded'));
+    </script>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+
+        const DEFAULT_TEAM_MEMBERS = [
+            "姚詠宸", "張紫瑄", "周祐生", "黃聖惠", "翟永翔", "章祐榮", 
+            "蔡春燕", "顏正盈", "黃淑萌", "朱宏瑋", "周羿誼", "陳克威"
+        ];
+
+        const METRICS_STRUCTURE = [
+            { dimension: "維度1：服務實作指標", color: "bg-[#557A8B]", hex: "#557A8B", metrics: ["服務件訪視次數", "保單校正", "保險視圖", "Fitback"] },
+            { dimension: "維度2：經營成果指標", color: "bg-[#005537]", hex: "#005537", metrics: ["舉績P數", "舉績件數"], isFloat: true },
+            { dimension: "維度3：整合行銷指標", color: "bg-[#D98719]", hex: "#D98719", metrics: ["車預單", "E證券", "信用卡", "房貸"] },
+            { dimension: "維度4：增員指標", color: "bg-[#6B2A8C]", hex: "#6B2A8C", metrics: ["新增綠卡", "考照推進"] },
+            { dimension: "維度5：主管輔導指標", color: "bg-[#5A5A5A]", hex: "#5A5A5A", metrics: ["FOD次數"] }
+        ];
+
+        const FLAT_METRICS = METRICS_STRUCTURE.flatMap(d => d.metrics);
+        const formatDate = (date) => date.toISOString().split('T')[0];
+
+        const getLastCycleDates = () => {
+            const now = new Date();
+            const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            const dayOfWeek = today.getDay();
+            let daysToLastThursday = (dayOfWeek + 7 - 4) % 7;
+            if (dayOfWeek === 4) daysToLastThursday = 7;
+            if (dayOfWeek === 5) daysToLastThursday = 1;
+
+            const endDate = new Date(today);
+            endDate.setDate(today.getDate() - daysToLastThursday);
+            
+            const startDate = new Date(endDate);
+            startDate.setDate(endDate.getDate() - 6);
+
+            return {
+                start: formatDate(startDate),
+                end: formatDate(endDate)
+            };
+        };
+
+        function App() {
+            const [firebaseReady, setFirebaseReady] = useState(false);
+            const [user, setUser] = useState(null);
+            const [activeTab, setActiveTab] = useState('entry');
+            const [teamMembers, setTeamMembers] = useState(DEFAULT_TEAM_MEMBERS);
+            const [entries, setEntries] = useState([]);
+            const [dbInstance, setDbInstance] = useState(null);
+            const [appIdStr, setAppIdStr] = useState('cathay-training-app');
+
+            useEffect(() => {
+                const handleFirebaseLoaded = () => {
+                    try {
+                        const { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, getFirestore, collection, onSnapshot, doc, setDoc } = window.firebaseModules;
+                        
+                        const appId = 'cathay-training-app';
+                        setAppIdStr(appId);
+                        
+                        // Fallback configuration for standard GitHub Pages execution
+                        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+                            projectId: "cathay-training-app",
+                            appId: "1:default:web"
+                        };
+                        
+                        const app = initializeApp(firebaseConfig);
+                        const db = getFirestore(app);
+                        const auth = getAuth(app);
+                        setDbInstance(db);
+
+                        const initAuth = async () => {
+                            try {
+                                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                                    await signInWithCustomToken(auth, __initial_auth_token);
+                                } else {
+                                    await signInAnonymously(auth);
+                                }
+                            } catch (e) {
+                                console.error("Auth error:", e);
+                            }
+                        };
+
+                        auth.onAuthStateChanged(u => {
+                            setUser(u);
+                            if (u) {
+                                const entriesRef = collection(db, 'artifacts', appId, 'public', 'data', 'daily_entries');
+                                onSnapshot(entriesRef, (snapshot) => {
+                                    const data = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+                                    setEntries(data);
+                                });
+
+                                const settingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'team');
+                                onSnapshot(settingsRef, (docSnap) => {
+                                    if (docSnap.exists() && docSnap.data().members) {
+                                        setTeamMembers(docSnap.data().members);
+                                    } else {
+                                        setDoc(settingsRef, { members: DEFAULT_TEAM_MEMBERS });
+                                    }
+                                });
+                            }
+                        });
+
+                        initAuth();
+                        setFirebaseReady(true);
+                    } catch (err) {
+                        console.error("Firebase init failed:", err);
+                        setFirebaseReady(true);
+                    }
+                };
+
+                if (window.firebaseModules) {
+                    handleFirebaseLoaded();
+                } else {
+                    window.addEventListener('firebase-loaded', handleFirebaseLoaded);
+                }
+            }, []);
+
+            if (!firebaseReady) {
+                return (
+                    <div className="flex h-screen items-center justify-center bg-slate-50">
+                        <div className="text-xl text-slate-500 font-semibold animate-pulse">系統連線中...</div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="min-h-screen bg-slate-100 pb-12">
+                    <nav className="bg-[#005537] text-white p-4 shadow-md sticky top-0 z-50">
+                        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-4">
+                            <h1 className="text-2xl font-bold tracking-wider cursor-pointer" onClick={() => setActiveTab('entry')}>
+                                國泰人壽新人日盤系統
+                            </h1>
+                            <div className="flex flex-wrap gap-1 bg-slate-800 p-1 rounded-lg">
+                                {[
+                                    { id: 'entry', label: '每日填報' },
+                                    { id: 'report', label: '每週統計' },
+                                    { id: 'view', label: '單日查詢 🔍' },
+                                    { id: 'settings', label: '名單設定 ⚙️' }
+                                ].map(tab => (
+                                    <button 
+                                        key={tab.id}
+                                        onClick={() => setActiveTab(tab.id)}
+                                        className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === tab.id ? 'bg-[#007A52] text-white shadow' : 'text-slate-300 hover:text-white hover:bg-slate-700'}`}
+                                    >
+                                        {tab.label}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    </nav>
+
+                    <main className="max-w-7xl mx-auto p-4 py-8">
+                        {activeTab === 'entry' && <DailyEntryForm user={user} teamMembers={teamMembers} entries={entries} db={dbInstance} appId={appIdStr} />}
+                        {activeTab === 'report' && <WeeklyReport entries={entries} teamMembers={teamMembers} />}
+                        {activeTab === 'view' && <DailyView entries={entries} teamMembers={teamMembers} />}
+                        {activeTab === 'settings' && <SettingsManager teamMembers={teamMembers} db={dbInstance} appId={appIdStr} />}
+                    </main>
+                </div>
+            );
+        }
+
+        function DailyEntryForm({ user, teamMembers, entries, db, appId }) {
+            const [formData, setFormData] = useState({
+                name: localStorage.getItem('cathay_last_name') || '',
+                date: formatDate(new Date()),
+                metrics: Object.fromEntries(FLAT_METRICS.map(m => [m, '']))
+            });
+            const [isSubmitting, setIsSubmitting] = useState(false);
+            const [message, setMessage] = useState('');
+
+            const handleNameChange = (name) => {
+                setFormData(prev => ({ ...prev, name }));
+                localStorage.setItem('cathay_last_name', name);
+            };
+
+            useEffect(() => {
+                if (formData.name && formData.date) {
+                    const existingEntry = entries.find(e => e.name === formData.name && e.date === formData.date);
+                    if (existingEntry && existingEntry.metrics) {
+                        setFormData(prev => ({
+                            ...prev,
+                            metrics: { ...existingEntry.metrics }
+                        }));
+                    } else {
+                        setFormData(prev => ({
+                            ...prev,
+                            metrics: Object.fromEntries(FLAT_METRICS.map(m => [m, '']))
+                        }));
+                    }
+                }
+            }, [formData.name, formData.date, entries]);
+
+            const handleMetricChange = (metric, value) => {
+                setFormData(prev => ({
+                    ...prev,
+                    metrics: { ...prev.metrics, [metric]: value }
+                }));
+            };
+
+            const handleAdjust = (metric, amount, isFloat) => {
+                const currentVal = Number(formData.metrics[metric]) || 0;
+                let newVal = currentVal + amount;
+                if (newVal < 0) newVal = 0;
+                if (isFloat) newVal = Math.round(newVal * 10) / 10;
+                handleMetricChange(metric, newVal === 0 ? '' : newVal);
+            };
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                if (!formData.name) {
+                    setMessage('請選擇姓名！');
+                    return;
+                }
+
+                setIsSubmitting(true);
+                setMessage('');
+
+                try {
+                    const docId = `${formData.name}_${formData.date}`;
+                    if (db) {
+                        const { doc, setDoc } = window.firebaseModules;
+                        const entryRef = doc(db, 'artifacts', appId, 'public', 'data', 'daily_entries', docId);
+                        
+                        const processedMetrics = {};
+                        for (const [key, val] of Object.entries(formData.metrics)) {
+                            processedMetrics[key] = val === '' ? 0 : Number(val);
+                        }
+
+                        await setDoc(entryRef, {
+                            userId: user ? user.uid : 'anonymous',
+                            name: formData.name,
+                            date: formData.date,
+                            metrics: processedMetrics,
+                            timestamp: new Date().getTime()
+                        });
+                        setMessage('✅ 儲存成功！您的數據已成功寫入雲端。');
+                    } else {
+                        setMessage('⚠️ 雲端資料庫尚未準備好，請稍後再試。');
+                    }
+                } catch (error) {
+                    console.error("Error saving: ", error);
+                    setMessage('❌ 發生錯誤，請稍後再試。');
+                } finally {
+                    setIsSubmitting(false);
+                    setTimeout(() => setMessage(''), 4000);
+                }
+            };
+
+            return (
+                <div className="max-w-2xl mx-auto bg-white rounded-xl shadow-lg p-6 sm:p-8">
+                    <div className="flex justify-between items-center mb-6 border-b pb-4">
+                        <h2 className="text-2xl font-bold text-slate-800">今日進度填報</h2>
+                        {formData.name && (
+                            <span className="text-xs bg-emerald-100 text-emerald-800 px-3 py-1 rounded-full font-medium">
+                                已記憶：{formData.name}
+                            </span>
+                        )}
+                    </div>
+
+                    <div className="mb-6 p-4 bg-emerald-50 text-emerald-800 rounded-md border border-emerald-200 text-sm flex gap-2">
+                        <span className="text-xl">💡</span>
+                        <p>點選數字旁的 <strong>+</strong> / <strong>-</strong> 可快速增減數量！送出後會直接覆蓋當日最新紀錄。</p>
+                    </div>
+
+                    {message && (
+                        <div className={`p-4 mb-6 rounded-md font-bold ${message.includes('成功') ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                            {message}
+                        </div>
+                    )}
+
+                    <form onSubmit={handleSubmit} className="space-y-6">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                            <div>
+                                <label className="block text-sm font-semibold text-slate-700 mb-2">姓名 (必填)</label>
+                                <select 
+                                    value={formData.name} 
+                                    onChange={e => handleNameChange(e.target.value)}
+                                    className="w-full p-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-[#005537] outline-none text-lg bg-white"
+                                    required
+                                >
+                                    <option value="" disabled>請選擇您的名字</option>
+                                    {teamMembers.map(name => <option key={name} value={name}>{name}</option>)}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-semibold text-slate-700 mb-2">日期</label>
+                                <input 
+                                    type="date" 
+                                    value={formData.date}
+                                    onChange={e => setFormData({...formData, date: e.target.value})}
+                                    className="w-full p-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-[#005537] outline-none text-lg"
+                                    required
+                                />
+                            </div>
+                        </div>
+
+                        <div className="space-y-6 mt-8">
+                            {METRICS_STRUCTURE.map((dim, idx) => (
+                                <div key={idx} className="bg-slate-50 p-4 rounded-lg border border-slate-200 shadow-sm">
+                                    <h3 className={`text-sm font-bold mb-4 inline-block px-3 py-1 rounded text-white ${dim.color}`}>
+                                        {dim.dimension}
+                                    </h3>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                        {dim.metrics.map(metric => {
+                                            const val = formData.metrics[metric];
+                                            return (
+                                                <div key={metric} className="bg-white p-3 rounded-md border border-slate-200 flex items-center justify-between gap-2 shadow-xs">
+                                                    <label className="text-sm font-medium text-slate-700 flex-1">{metric}</label>
+                                                    <div className="flex items-center space-x-1">
+                                                        <button 
+                                                            type="button"
+                                                            onClick={() => handleAdjust(metric, dim.isFloat ? -0.5 : -1, dim.isFloat)}
+                                                            className="w-9 h-9 bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold rounded-l flex items-center justify-center text-lg select-none"
+                                                        >
+                                                            -
+                                                        </button>
+                                                        <input 
+                                                            type="number" 
+                                                            step={dim.isFloat ? "0.1" : "1"}
+                                                            min="0"
+                                                            value={val}
+                                                            onChange={e => handleMetricChange(metric, e.target.value)}
+                                                            className="w-16 p-1 border-y border-slate-300 text-center font-bold text-slate-800 focus:outline-none h-9 text-base"
+                                                            placeholder="0"
+                                                        />
+                                                        <button 
+                                                            type="button"
+                                                            onClick={() => handleAdjust(metric, dim.isFloat ? 0.5 : 1, dim.isFloat)}
+                                                            className="w-9 h-9 bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold rounded-r flex items-center justify-center text-lg select-none"
+                                                        >
+                                                            +
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+
+                        <button 
+                            type="submit" 
+                            disabled={isSubmitting}
+                            className="w-full py-4 bg-[#005537] hover:bg-[#007A52] text-white font-bold rounded-lg shadow-md transition-all disabled:opacity-50 text-lg mt-8"
+                        >
+                            {isSubmitting ? '儲存中...' : '儲存今日資料'}
+                        </button>
+                    </form>
+                </div>
+            );
+        }
+
+        function WeeklyReport({ entries, teamMembers }) {
+            const defaultDates = getLastCycleDates();
+            const [startDate, setStartDate] = useState(defaultDates.start);
+            const [endDate, setEndDate] = useState(defaultDates.end);
+            const tableRef = useRef(null);
+
+            const aggregatedData = useMemo(() => {
+                const filtered = entries.filter(entry => entry.date >= startDate && entry.date <= endDate);
+                const summary = {};
+                teamMembers.forEach(name => {
+                    summary[name] = Object.fromEntries(FLAT_METRICS.map(m => [m, 0]));
+                });
+
+                filtered.forEach(entry => {
+                    if (summary[entry.name]) {
+                        for (const [metric, value] of Object.entries(entry.metrics || {})) {
+                            if (summary[entry.name][metric] !== undefined) {
+                                summary[entry.name][metric] += (Number(value) || 0);
+                            }
+                        }
+                    }
+                });
+                return summary;
+            }, [entries, startDate, endDate, teamMembers]);
+
+            const copyToClipboard = () => {
+                if (!tableRef.current) return;
+                const range = document.createRange();
+                range.selectNode(tableRef.current);
+                const windowSelection = window.getSelection();
+                windowSelection.removeAllRanges();
+                windowSelection.addRange(range);
+
+                try {
+                    document.execCommand('copy');
+                    const toast = document.createElement('div');
+                    toast.textContent = '✅ 表格已複製！可以直接貼上至 Excel。';
+                    toast.className = 'fixed bottom-5 right-5 bg-green-600 text-white px-6 py-3 rounded-lg shadow-xl z-50';
+                    document.body.appendChild(toast);
+                    setTimeout(() => document.body.removeChild(toast), 3000);
+                } catch (err) {
+                    console.error('複製失敗:', err);
+                }
+                windowSelection.removeAllRanges();
+            };
+
+            return (
+                <div className="bg-white rounded-xl shadow-lg p-4 sm:p-6 overflow-hidden">
+                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4 border-b pb-4">
+                        <div>
+                            <h2 className="text-2xl font-bold text-slate-800">國泰人壽新人日盤統計表</h2>
+                            <p className="text-sm text-slate-500 mt-1">預設為上一個「週五至週四」的完整週期。</p>
+                        </div>
+                        
+                        <div className="flex flex-wrap items-center gap-3 bg-slate-50 p-3 rounded-lg border border-slate-200">
+                            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="p-2 text-sm border rounded"/>
+                            <span className="text-slate-400">至</span>
+                            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} className="p-2 text-sm border rounded"/>
+                            <button onClick={() => { const d = getLastCycleDates(); setStartDate(d.start); setEndDate(d.end); }} className="text-sm text-[#005537] hover:text-[#007A52] font-medium">
+                                自動抓取上週五~四
+                            </button>
+                        </div>
+                    </div>
+
+                    <button onClick={copyToClipboard} className="mb-4 flex items-center space-x-2 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg shadow font-medium">
+                        <span>複製表格至 Excel</span>
+                    </button>
+
+                    <div className="overflow-x-auto w-full border border-slate-300">
+                        <table ref={tableRef} className="w-full min-w-max border-collapse text-center" style={{ borderCollapse: 'collapse', borderSpacing: 0 }}>
+                            <thead>
+                                <tr>
+                                    <th colSpan={FLAT_METRICS.length + 1} className="py-4 text-3xl font-bold border border-black bg-white" style={{ border: '1px solid black', padding: '16px' }}>
+                                        國泰人壽新人日盤統計表
+                                    </th>
+                                </tr>
+                                <tr>
+                                    <th className="bg-[#005537] text-white border border-black px-2 py-3 w-24 align-middle" style={{ backgroundColor: '#005537', color: 'white', border: '1px solid black' }}>
+                                        指標維度
+                                    </th>
+                                    {METRICS_STRUCTURE.map((dim, idx) => (
+                                        <th key={idx} colSpan={dim.metrics.length} className="text-white border border-black py-3 px-2 align-middle" style={{ backgroundColor: dim.hex, color: 'white', border: '1px solid black' }}>
+                                            <div className="whitespace-pre-wrap">{dim.dimension.replace('：', ':\n')}</div>
+                                        </th>
+                                    ))}
+                                </tr>
+                                <tr>
+                                    <th className="bg-[#005537] text-white border border-black px-2 py-2" style={{ backgroundColor: '#005537', color: 'white', border: '1px solid black' }}>
+                                        姓名
+                                    </th>
+                                    {METRICS_STRUCTURE.map(dim => (
+                                        dim.metrics.map(metric => (
+                                            <th key={metric} className="bg-white text-black border border-black px-2 py-2 w-16 text-sm font-semibold" style={{ backgroundColor: 'white', color: 'black', border: '1px solid black' }}>
+                                                <div style={{ minWidth: '40px' }}>{metric}</div>
+                                            </th>
+                                        ))
+                                    ))}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {teamMembers.map((name, index) => {
+                                    const rowData = aggregatedData[name] || {};
+                                    return (
+                                        <tr key={name}>
+                                            <td className="border border-black px-2 py-2 font-bold" style={{ backgroundColor: index % 2 === 0 ? '#005537' : '#007A52', color: 'white', border: '1px solid black' }}>
+                                                {name}
+                                            </td>
+                                            {METRICS_STRUCTURE.map(dim => (
+                                                dim.metrics.map(metric => {
+                                                    const val = rowData[metric];
+                                                    let displayVal = "";
+                                                    if (val > 0) {
+                                                        displayVal = dim.isFloat ? val.toFixed(1) : Math.round(val);
+                                                    }
+                                                    return (
+                                                        <td key={metric} className="border border-black px-2 py-2 text-right bg-white" style={{ border: '1px solid black', textAlign: 'right', backgroundColor: 'white' }}>
+                                                            {displayVal}
+                                                        </td>
+                                                    );
+                                                })
+                                            ))}
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            );
+        }
+
+        function DailyView({ entries, teamMembers }) {
+            const [selectedName, setSelectedName] = useState('');
+            const [selectedDate, setSelectedDate] = useState(formatDate(new Date()));
+            const currentEntry = entries.find(e => e.name === selectedName && e.date === selectedDate);
+
+            return (
+                <div className="max-w-3xl mx-auto bg-white rounded-xl shadow-lg p-6 sm:p-8">
+                    <h2 className="text-2xl font-bold text-slate-800 mb-6 border-b pb-4">單日紀錄查詢</h2>
+                    
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-8">
+                        <div>
+                            <label className="block text-sm font-semibold text-slate-700 mb-2">查詢姓名</label>
+                            <select value={selectedName} onChange={e => setSelectedName(e.target.value)} className="w-full p-3 border border-slate-300 rounded-md bg-white">
+                                <option value="" disabled>請選擇要查詢的姓名</option>
+                                {teamMembers.map(name => <option key={name} value={name}>{name}</option>)}
+                            </select>
+                        </div>
+                        <div>
+                            <label className="block text-sm font-semibold text-slate-700 mb-2">查詢日期</label>
+                            <input type="date" value={selectedDate} onChange={e => setSelectedDate(e.target.value)} className="w-full p-3 border border-slate-300 rounded-md"/>
+                        </div>
+                    </div>
+
+                    {!selectedName ? (
+                        <div className="text-center py-10 bg-slate-50 rounded-lg text-slate-500">請先選擇上方「姓名」以查看該日紀錄。</div>
+                    ) : !currentEntry ? (
+                        <div className="text-center py-10 bg-orange-50 rounded-lg text-orange-600 font-medium">查無 <strong>{selectedName}</strong> 在 {selectedDate} 的填報紀錄。</div>
+                    ) : (
+                        <div className="space-y-6">
+                            <div className="flex justify-between items-center bg-green-50 p-4 rounded-md border border-green-200">
+                                <span className="text-green-800 font-medium">已找到 <strong>{selectedName}</strong> 在 {selectedDate} 的紀錄</span>
+                                {currentEntry.timestamp && (
+                                    <span className="text-xs text-green-700 bg-green-100 px-2 py-1 rounded">
+                                        最後更新：{new Date(currentEntry.timestamp).toLocaleString('zh-TW')}
+                                    </span>
+                                )}
+                            </div>
+                            
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                {METRICS_STRUCTURE.map((dim, idx) => {
+                                    const hasData = dim.metrics.some(metric => currentEntry.metrics[metric] > 0);
+                                    if (!hasData) return null;
+                                    return (
+                                        <div key={idx} className="bg-slate-50 p-4 rounded-lg border border-slate-200">
+                                            <h3 className={`text-sm font-bold mb-3 inline-block px-2 py-1 rounded text-white ${dim.color}`}>
+                                                {dim.dimension.split('：')[1]}
+                                            </h3>
+                                            <ul className="space-y-2">
+                                                {dim.metrics.map(metric => {
+                                                    const val = currentEntry.metrics[metric];
+                                                    if (!val || val === 0) return null;
+                                                    const displayVal = dim.isFloat ? Number(val).toFixed(1) : Math.round(Number(val));
+                                                    return (
+                                                        <li key={metric} className="flex justify-between items-center border-b border-slate-200 pb-1">
+                                                            <span className="text-slate-600 text-sm">{metric}</span>
+                                                            <span className="font-bold text-slate-800 text-lg">{displayVal}</span>
+                                                        </li>
+                                                    );
+                                                })}
+                                            </ul>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        function SettingsManager({ teamMembers, db, appId }) {
+            const [newName, setNewName] = useState('');
+            const [isSaving, setIsSaving] = useState(false);
+            const [toastMsg, setToastMsg] = useState('');
+            const [confirmDeleteState, setConfirmDeleteState] = useState(null);
+
+            const showToast = (msg, isError = false) => {
+                setToastMsg({ text: msg, isError });
+                setTimeout(() => setToastMsg(''), 3000);
+            };
+
+            const updateTeamToFirebase = async (updatedMembers) => {
+                setIsSaving(true);
+                try {
+                    if (db) {
+                        const { doc, setDoc } = window.firebaseModules;
+                        const settingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'team');
+                        await setDoc(settingsRef, { members: updatedMembers });
+                    }
+                    showToast('名單已更新！');
+                } catch (error) {
+                    console.error("更新名單失敗:", error);
+                    showToast('更新失敗，請稍後再試。', true);
+                } finally {
+                    setIsSaving(false);
+                }
+            };
+
+            const handleAdd = (e) => {
+                e.preventDefault();
+                const trimmedName = newName.trim();
+                if (!trimmedName) return;
+                if (teamMembers.includes(trimmedName)) {
+                    showToast('這個名字已經在名單中了！', true);
+                    return;
+                }
+                updateTeamToFirebase([...teamMembers, trimmedName]);
+                setNewName('');
+            };
+
+            const handleRemove = (nameToRemove) => {
+                if (confirmDeleteState === nameToRemove) {
+                    updateTeamToFirebase(teamMembers.filter(name => name !== nameToRemove));
+                    setConfirmDeleteState(null);
+                } else {
+                    setConfirmDeleteState(nameToRemove);
+                    setTimeout(() => setConfirmDeleteState(null), 3000);
+                }
+            };
+
+            return (
+                <div className="max-w-2xl mx-auto bg-white rounded-xl shadow-lg p-6 sm:p-8">
+                    <h2 className="text-2xl font-bold text-slate-800 mb-6 border-b pb-4">編輯人員名單</h2>
+                    
+                    {toastMsg && (
+                        <div className={`p-4 mb-6 rounded-md font-bold ${toastMsg.isError ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
+                            {toastMsg.text}
+                        </div>
+                    )}
+
+                    <form onSubmit={handleAdd} className="flex flex-col sm:flex-row gap-4 mb-8">
+                        <input 
+                            type="text" 
+                            value={newName}
+                            onChange={e => setNewName(e.target.value)}
+                            placeholder="輸入新成員姓名 (例如: 王大明)"
+                            className="flex-1 p-3 border border-slate-300 rounded-md outline-none"
+                        />
+                        <button type="submit" disabled={isSaving || !newName.trim()} className="px-6 py-3 bg-[#005537] hover:bg-[#007A52] text-white font-bold rounded-md disabled:opacity-50">
+                            新增成員
+                        </button>
+                    </form>
+
+                    <ul className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        {teamMembers.map(name => (
+                            <li key={name} className="flex justify-between items-center bg-white border border-slate-200 p-3 rounded-md">
+                                <span className="font-medium text-slate-700">{name}</span>
+                                <button 
+                                    onClick={() => handleRemove(name)}
+                                    disabled={isSaving}
+                                    className={`px-3 py-1 rounded text-sm font-medium ${confirmDeleteState === name ? 'bg-red-500 text-white' : 'text-red-500 bg-red-50 hover:bg-red-100'}`}
+                                >
+                                    {confirmDeleteState === name ? '確定移除?' : '移除'}
+                                </button>
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            );
+        }
+
+        const rootElement = document.getElementById('root');
+        if (rootElement) {
+            const root = ReactDOM.createRoot(rootElement);
+            root.render(<App />);
+        }
+    </script>
+</body>
+</html>
